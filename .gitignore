@@ -1,0 +1,11 @@
+elektrik/gambar/
+elektrik/helper/koneksi.php
+backend/node_modules/
+backend/.env
+html/
+appsheet_toolbox/
+elektrik/pages/assets/icon/fontawesome-pro_v6.7.2_web.zip
+elektrik/pages/assets/icon/fontawesome-pro_v6.7.2_web/
+elektrik/helper/url_config.php
+elektrik/pages/assets/js/config.js
+*.log

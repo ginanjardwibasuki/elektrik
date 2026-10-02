@@ -1,0 +1,43 @@
+        .card {
+            box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            background-color: #ffffff;
+        }
+        .input-group-text {
+            background-color: #e9ecef;
+        }
+        .error-message {
+            color: red;
+            font-size: 0.9em;
+            display: none;
+        }
+		.logger-container {
+            width: 100%; /* Lebar penuh agar sejajar */
+            max-width: 1000px; /* Sesuai dengan form Battery */
+            margin: auto;
+            border-radius: 8px;
+            box-shadow: 0px 4px 20px rgba(255, 255, 255, 0.8); /* Efek glow putih */
+            padding: 12px;
+            background-color: #000; /* Latar belakang hitam */
+            border: 2px solid #fff; /* Border putih */
+            font-size: 16px;
+            font-family: "Courier New", monospace; /* Font khas terminal */
+            color: #fff; /* Tulisan putih */
+        }
+        .log-line {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-weight: bold;
+        }
+		.mt-custom {
+			margin-top: 50px; /* Ubah angka sesuai kebutuhan */
+		}
+
+.footer {
+    position: relative;
+    bottom: 0;
+    width: 100%;
+    font-size: 14px;
+}

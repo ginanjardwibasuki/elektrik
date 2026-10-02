@@ -1,0 +1,18 @@
+.custom-style {
+    font-size: 12px;
+    text-align: left;
+    vertical-align: middle;
+    table-layout: fixed;
+}
+.truncate-text {
+    max-width: 150px;  /* Ubah sesuai kebutuhan */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dt-search {
+	display:none;
+}
+#dataTable > thead > tr {
+	display:none;
+}
