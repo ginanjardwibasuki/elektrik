@@ -1,0 +1,5 @@
+gambar/*
+helper/koneksi.php
+helper/url_config.php
+backend/.env
+pages/assets/js/config.js

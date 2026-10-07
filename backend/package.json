@@ -1,0 +1,23 @@
+{
+  "dependencies": {
+    "bull": "^4.16.5",
+    "bullmq": "^5.48.1",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "mysql2": "^3.14.0",
+    "node-fetch": "^3.3.2",
+    "pupeter": "^0.0.1-security",
+    "puppeteer": "^24.43.1",
+    "socket.io": "^4.8.1"
+  },
+  "name": "otomatis",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}

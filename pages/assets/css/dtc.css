@@ -1,0 +1,32 @@
+.card {
+  animation: fadeInUp 0.8s ease;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.table-hover tbody tr:hover {
+  background-color: #ffeeba;
+  cursor: pointer;
+}
+
+.scroll-text {
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+  background: #fff;
+  color: #000;
+}
+
+.scroll-text::before {
+  content: attr(data-text);
+  position: absolute;
+  animation: scroll 15s linear infinite;
+}
+
+@keyframes scroll {
+  0% { left: 100%; }
+  100% { left: -100%; }
+}
