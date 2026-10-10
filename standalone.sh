@@ -1,15 +1,15 @@
 #!/bin/bash
 # ==============================================================================
 # ELEKTRIK STACK INSTALLER - Enterprise Edition (Standalone)
-# Version: 2.1.1  |  Idempotent Multi-Run Deployment
+# Version: 2.1.2  |  Idempotent Multi-Run Deployment
 # Target : Debian 13 (LXC container atau VM, root access)
-# Fix    : CF_WEB_NAME & SOCKET_URL tidak persist di config
+# Fix    : Text file busy pada update Node.js (pm2 kill + atomic install)
 # ==============================================================================
 
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
 
-SCRIPT_VERSION="2.1.1"
+SCRIPT_VERSION="2.1.2"
 CONFIG_DIR="/root/config"
 CONFIG_FILE="${CONFIG_DIR}/elektrik.conf"
 MARKER_FILE="${CONFIG_DIR}/.elektrik_installed"
@@ -162,8 +162,6 @@ EOF
 }
 
 # ─── Config Management ────────────────────────────────────────────────────────
-
-# Recompute derived values (single source of truth)
 recompute_derived() {
     if [ -n "$DOMAIN" ] && [ -n "$CF_PRE_WEB" ]; then
         CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
@@ -179,14 +177,14 @@ recompute_derived() {
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
-        recompute_derived          # <-- FIX: pastikan CF_WEB_NAME & SOCKET_URL selalu ada
+        recompute_derived
         return 0
     fi
     return 1
 }
 
 save_config() {
-    recompute_derived              # <-- FIX: hitung dulu sebelum simpan
+    recompute_derived
     cat > "$CONFIG_FILE" <<EOF
 # ELEKTRIK STACK CONFIGURATION
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
@@ -348,8 +346,6 @@ mod_motd() {
     rm -f /etc/motd 2>/dev/null
     touch /etc/motd
 
-    # FIX: heredoc 'EOF' (quoted) → \$ tidak perlu di-escape, dan kita harus
-    # pakai heredoc UNQUOTED untuk interpolasi variabel CF_WEB_NAME
     cat > /etc/profile.d/99-elektrik-motd.sh <<MOTD_EOF
 #!/bin/bash
 # Dynamic MOTD - reads live config
@@ -410,7 +406,7 @@ mod_dependencies() {
         libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6
         libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
         libxrandr2 libxrender1 libxss1 libxtst6 apt-transport-https curl git lsb-release unzip
-        wget xdg-utils gnupg redis-server cron chromium)
+        wget xdg-utils gnupg redis-server cron chromium psmisc)
     local missing=()
     for p in "${pkgs[@]}"; do pkg_installed "$p" || missing+=("$p"); done
 
@@ -492,6 +488,7 @@ mod_phpmyadmin() {
     log_status "phpMyAdmin" "SUCCESS" "Terpasang"
 }
 
+# ─── FIXED v2.1.2: Text file busy pada update Node.js ─────────────────────────
 mod_nodejs_pm2() {
     ui_section "10" "Runtime - Node.js & PM2"
     local NODE_VERSION="v20.20.2"
@@ -501,23 +498,83 @@ mod_nodejs_pm2() {
     if [ "$current_node" = "$NODE_VERSION" ]; then
         ui_skip "Node.js $NODE_VERSION sudah terpasang"
     else
+        # ── FIX: Hentikan semua proses yang memakai binary node ──
+        if cmd_exists pm2; then
+            ui_step "Menghentikan PM2 daemon..."
+            pm2 kill >/dev/null 2>&1 || true
+            sleep 1
+        fi
+        if pgrep -x node >/dev/null 2>&1; then
+            ui_step "Menghentikan proses Node.js yang berjalan..."
+            pkill -9 -x node 2>/dev/null || true
+            sleep 1
+        fi
+        # Fallback: pakai fuser untuk lepaskan lock binary node
+        if [ -f /usr/local/bin/node ]; then
+            fuser -k /usr/local/bin/node 2>/dev/null || true
+            sleep 1
+        fi
+
         ui_step "Menginstal Node.js $NODE_VERSION..."
         apt remove -y nodejs npm nodejs-doc >/dev/null 2>&1 || true
         cd /tmp
+        rm -rf node-${NODE_VERSION}-linux-x64*
         wget -q https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz
         tar -xf node-${NODE_VERSION}-linux-x64.tar.xz
-        cp -r node-${NODE_VERSION}-linux-x64/* /usr/local/
-        rm -rf node-${NODE_VERSION}-linux-x64*
-        npm install -g npm@${NPM_VERSION} >/dev/null 2>&1 || true
+
+        # Hapus binary lama supaya mv/install bisa replace
+        rm -f /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack 2>/dev/null || true
+
+        # Copy binary pakai install (atomic, permission aman)
+        for bin in node npm npx corepack; do
+            if [ -f "/tmp/node-${NODE_VERSION}-linux-x64/bin/${bin}" ]; then
+                install -m 0755 "/tmp/node-${NODE_VERSION}-linux-x64/bin/${bin}" \
+                    "/usr/local/bin/${bin}" 2>/dev/null || \
+                    cp "/tmp/node-${NODE_VERSION}-linux-x64/bin/${bin}" "/usr/local/bin/${bin}"
+            fi
+        done
+
+        # Copy lib & include & share
+        mkdir -p /usr/local/lib /usr/local/include /usr/local/share
+        cp -r /tmp/node-${NODE_VERSION}-linux-x64/lib/* /usr/local/lib/ 2>/dev/null || true
+        cp -r /tmp/node-${NODE_VERSION}-linux-x64/include/* /usr/local/include/ 2>/dev/null || true
+        cp -r /tmp/node-${NODE_VERSION}-linux-x64/share/* /usr/local/share/ 2>/dev/null || true
+
+        rm -rf /tmp/node-${NODE_VERSION}-linux-x64*
         cd /root
+
+        # Set npm versi
+        npm install -g npm@${NPM_VERSION} >/dev/null 2>&1 || true
+
+        # Verifikasi
+        local new_node=$(node -v 2>/dev/null || echo "unknown")
+        if [ "$new_node" = "$NODE_VERSION" ]; then
+            ui_ok "Node.js $new_node berhasil terpasang"
+            log_status "Node.js" "SUCCESS" "$new_node"
+        else
+            ui_warn "Node.js terpasang versi $new_node (target: $NODE_VERSION)"
+            log_status "Node.js" "UPDATED" "$new_node"
+        fi
     fi
 
     if cmd_exists pm2; then
-        ui_skip "PM2 sudah terpasang"
+        ui_skip "PM2 sudah terpasang (v$(pm2 -v 2>/dev/null))"
     else
         ui_step "Menginstal PM2..."
         npm install -g pm2 >/dev/null 2>&1
     fi
+
+    # Restart PM2 proses elektrik kalau ada
+    if cmd_exists pm2 && [ -f /var/www/elektrik/backend/package.json ]; then
+        cd /var/www/elektrik/backend
+        if pm2 describe elektrik-backend >/dev/null 2>&1; then
+            ui_step "Restart PM2 elektrik-backend dengan Node baru..."
+            pm2 restart elektrik-backend >/dev/null 2>&1
+            pm2 save >/dev/null 2>&1
+        fi
+        cd /root
+    fi
+
     ui_ok "Node.js $(node -v) & PM2 $(pm2 -v 2>/dev/null)"
     log_status "Node & PM2" "SUCCESS" "Runtime siap"
 }
@@ -813,7 +870,6 @@ if [ -f "\$ARCHIVE_FILE" ]; then
             for part in "\${ARCHIVE_FILE}.part."*; do
                 [ -f "\$part" ] || continue
                 PART_NUM=\$((PART_NUM + 1))
-                PNAME=\$(basename "\$part")
                 PSIZE=\$(stat -c%s "\$part")
                 (curl -s -F document=@"\$part" "https://api.telegram.org/bot\$TG_BOT_TOKEN/sendDocument" \
                     -F chat_id="\$TG_CHAT_ID" \
@@ -936,7 +992,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 source "$CONFIG_FILE"
 
-# FIX: Recompute derived values agar tidak kosong saat config lama tidak punya field ini
 [ -n "$DOMAIN" ] && [ -n "$CF_PRE_WEB" ]    && CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
 [ -n "$DOMAIN" ] && [ -n "$CF_PRE_SOCKET" ] && SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
 [ -n "$DOMAIN" ] && CF_ROOT_DOMAIN="${DOMAIN}"
@@ -983,9 +1038,7 @@ edit_domain() {
     read -p "  Domain Utama [$DOMAIN]: " i; DOMAIN=${i:-$DOMAIN}
     read -p "  Subdomain Website [$CF_PRE_WEB]: " i; CF_PRE_WEB=${i:-$CF_PRE_WEB}
     read -p "  Subdomain Socket [$CF_PRE_SOCKET]: " i; CF_PRE_SOCKET=${i:-$CF_PRE_SOCKET}
-    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
-    SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
-    CF_ROOT_DOMAIN="${DOMAIN}"
+    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"; SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
 }
 edit_cloudflare() {
     read -p "  CF Account ID [$CF_ACCOUNT_ID]: " i; CF_ACCOUNT_ID=${i:-$CF_ACCOUNT_ID}
@@ -1001,7 +1054,6 @@ edit_telegram() {
 }
 
 save_and_apply() {
-    # FIX: recompute derived values
     CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
     SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
     CF_ROOT_DOMAIN="${DOMAIN}"
