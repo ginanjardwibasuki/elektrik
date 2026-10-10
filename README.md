@@ -103,7 +103,7 @@ bash <(curl -s https://raw.githubusercontent.com/ginanjardwibasuki/elektrik/main
 
 OR
 
-Run the single-line command below directly from your **Proxmox LXC** terminal Recomendation use Debian 13 (debian-13-standard_13.6-1_amd64.tar.zst) :
+Run the single-line command below directly from your Proxmox LXC terminal. Recommended: Use Debian 13 (debian-13-standard_13.6-1_amd64.tar.zst). :
 
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/ginanjardwibasuki/elektrik/main/standalone.sh)
