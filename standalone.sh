@@ -1,16 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-#   ⚡ ELEKTRIK STACK INSTALLER - Standalone LXC Edition
-#   Version : 2.0.1
-#   Target  : Debian 13 (LXC container, root access)
-#   Usage   : bash install_elektrik.sh
-#   Feature : Idempotent, Enterprise UI, Multi-Run Safe
+# ELEKTRIK STACK INSTALLER - Enterprise Edition (Standalone)
+# Version: 2.1.1  |  Idempotent Multi-Run Deployment
+# Target : Debian 13 (LXC container atau VM, root access)
+# Fix    : CF_WEB_NAME & SOCKET_URL tidak persist di config
 # ==============================================================================
 
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
 
-SCRIPT_VERSION="2.0.1"
+SCRIPT_VERSION="2.1.1"
 CONFIG_DIR="/root/config"
 CONFIG_FILE="${CONFIG_DIR}/elektrik.conf"
 MARKER_FILE="${CONFIG_DIR}/.elektrik_installed"
@@ -20,11 +19,12 @@ OUTPUT_LOG_FILE="${LOG_DIR}/install_output.log"
 WEB_DIR="/var/www/elektrik"
 BACKEND_DIR="${WEB_DIR}/backend"
 GIT_REPO="https://github.com/ginanjardwibasuki/elektrik.git"
+RESTORE_DIR="/root/restore"
+SPLIT_THRESHOLD=$((48 * 1024 * 1024))
 
-mkdir -p "${CONFIG_DIR}" "${LOG_DIR}"
+mkdir -p "${CONFIG_DIR}" "${LOG_DIR}" "${RESTORE_DIR}"
 chmod 700 "${CONFIG_DIR}"
 
-# ─── Colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
     BOLD="\e[1m"; DIM="\e[2m"; RED="\e[1;31m"; GREEN="\e[1;32m"; YELLOW="\e[1;33m"
     BLUE="\e[1;34m"; MAGENTA="\e[1;35m"; CYAN="\e[1;36m"; WHITE="\e[1;37m"
@@ -37,7 +37,7 @@ fi
 ui_banner() {
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════╗${RESET}"
     echo -e "${CYAN}║${RESET}                                                                          ${CYAN}║${RESET}"
-    echo -e "${CYAN}║${RESET}   ${BOLD}${WHITE}⚡ ELEKTRIK STACK INSTALLER${RESET}   ${GREY}Standalone LXC Edition${RESET}             ${CYAN}║${RESET}"
+    echo -e "${CYAN}║${RESET}   ${BOLD}${WHITE}⚡ ELEKTRIK STACK INSTALLER${RESET}   ${GREY}Enterprise Edition${RESET}                  ${CYAN}║${RESET}"
     echo -e "${CYAN}║${RESET}   ${GREY}Version ${SCRIPT_VERSION}  •  Idempotent Multi-Run Deployment${RESET}             ${CYAN}║${RESET}"
     echo -e "${CYAN}║${RESET}                                                                          ${CYAN}║${RESET}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════╝${RESET}"
@@ -75,16 +75,10 @@ ui_password() {
 pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
 cmd_exists()    { command -v "$1" >/dev/null 2>&1; }
 
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${RED}Script ini harus dijalankan sebagai root.${RESET}"; exit 1
-    fi
-}
+check_root() { [ "$EUID" -ne 0 ] && { echo -e "${RED}Harus dijalankan sebagai root.${RESET}"; exit 1; }; }
 
 check_debian() {
-    if [ ! -f /etc/os-release ]; then
-        ui_fail "Tidak bisa mendeteksi OS."; exit 1
-    fi
+    [ ! -f /etc/os-release ] && { ui_fail "Tidak bisa mendeteksi OS."; exit 1; }
     . /etc/os-release
     ui_info "OS terdeteksi: ${PRETTY_NAME}"
 }
@@ -98,9 +92,7 @@ check_internet() {
         fi
         sleep 1
     done
-    if [ "$ok" -eq 0 ]; then
-        ui_fail "Tidak ada koneksi internet. Periksa jaringan container."; exit 1
-    fi
+    [ "$ok" -eq 0 ] && { ui_fail "Tidak ada koneksi internet."; exit 1; }
 }
 
 init_logging() {
@@ -130,7 +122,6 @@ log_status() {
 detect_prior_install() { [ -f "$MARKER_FILE" ]; }
 
 show_prior_install_info() {
-    # shellcheck disable=SC1090
     source "$MARKER_FILE" 2>/dev/null || true
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════════════════╗${RESET}"
@@ -171,16 +162,31 @@ EOF
 }
 
 # ─── Config Management ────────────────────────────────────────────────────────
+
+# Recompute derived values (single source of truth)
+recompute_derived() {
+    if [ -n "$DOMAIN" ] && [ -n "$CF_PRE_WEB" ]; then
+        CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
+    fi
+    if [ -n "$DOMAIN" ] && [ -n "$CF_PRE_SOCKET" ]; then
+        SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
+    fi
+    if [ -n "$DOMAIN" ]; then
+        CF_ROOT_DOMAIN="${DOMAIN}"
+    fi
+}
+
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
-        # shellcheck disable=SC1090
         source "$CONFIG_FILE"
+        recompute_derived          # <-- FIX: pastikan CF_WEB_NAME & SOCKET_URL selalu ada
         return 0
     fi
     return 1
 }
 
 save_config() {
+    recompute_derived              # <-- FIX: hitung dulu sebelum simpan
     cat > "$CONFIG_FILE" <<EOF
 # ELEKTRIK STACK CONFIGURATION
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
@@ -193,6 +199,9 @@ BACKEND_PORT="$BACKEND_PORT"
 DOMAIN="$DOMAIN"
 CF_PRE_WEB="$CF_PRE_WEB"
 CF_PRE_SOCKET="$CF_PRE_SOCKET"
+CF_WEB_NAME="$CF_WEB_NAME"
+SOCKET_URL="$SOCKET_URL"
+CF_ROOT_DOMAIN="$CF_ROOT_DOMAIN"
 CF_ACCOUNT_ID="$CF_ACCOUNT_ID"
 CF_ZONE_ID="$CF_ZONE_ID"
 CF_API_TOKEN="$CF_API_TOKEN"
@@ -206,7 +215,6 @@ EOF
 prompt_config() {
     ui_section "1/4" "KONFIGURASI DATABASE & APLIKASI"
     ui_info "Host/User default: localhost/root (tekan Enter untuk default)"
-    ui_info "Password DB disembunyikan; Port backend default 2083"
     ui_divider
     local INPUT
     INPUT=$(ui_input "Database Host" "${DB_HOST:-localhost}"); DB_HOST="$INPUT"
@@ -216,25 +224,21 @@ prompt_config() {
     INPUT=$(ui_input "Port Backend Node.js" "${BACKEND_PORT:-2083}"); BACKEND_PORT="$INPUT"
 
     ui_section "2/4" "KONFIGURASI DOMAIN & URL"
-    ui_info "Masukkan domain tanpa http:// atau https://"
     ui_divider
     INPUT=$(ui_input "Domain Utama" "${DOMAIN:-}"); DOMAIN="$INPUT"
     INPUT=$(ui_input "Subdomain Website" "${CF_PRE_WEB:-elektrik}"); CF_PRE_WEB="$INPUT"
     INPUT=$(ui_input "Subdomain Backend/Socket" "${CF_PRE_SOCKET:-api}"); CF_PRE_SOCKET="$INPUT"
-    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
-    SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
-    CF_ROOT_DOMAIN="${DOMAIN}"
+    recompute_derived
+    ui_info "Website URL : https://${CF_WEB_NAME}"
+    ui_info "API URL     : https://${SOCKET_URL}"
 
     ui_section "3/4" "KONFIGURASI CLOUDFLARE API"
-    ui_info "Dashboard: dash.cloudflare.com | Token: profile/api-tokens"
-    ui_info "Permission: Account|Tunnel|Edit, Zone|DNS|Edit, Zone|Zone|Read"
     ui_divider
     INPUT=$(ui_input "Cloudflare Account ID" "${CF_ACCOUNT_ID:-}"); CF_ACCOUNT_ID="$INPUT"
     INPUT=$(ui_input "Cloudflare Zone ID" "${CF_ZONE_ID:-}"); CF_ZONE_ID="$INPUT"
     INPUT=$(ui_password "Cloudflare API Token [***]"); [ -n "$INPUT" ] && CF_API_TOKEN="$INPUT"
 
     ui_section "4/4" "AUTO-BACKUP TELEGRAM"
-    ui_info "Bot: @BotFather (/newbot)  |  Chat ID: @userinfobot"
     ui_divider
     INPUT=$(ui_input "Aktifkan Auto-Backup Harian (y/n)" "${ENABLE_BACKUP:-y}"); ENABLE_BACKUP="$INPUT"
     if [[ "$ENABLE_BACKUP" =~ ^[Yy]$ ]]; then
@@ -245,6 +249,23 @@ prompt_config() {
     save_config
     log_status "Konfigurasi" "SUCCESS" "Disimpan ke $CONFIG_FILE"
     ui_ok "Konfigurasi tersimpan di $CONFIG_FILE"
+}
+
+# ─── Self Preservation: autoupdate ────────────────────────────────────────────
+mod_self_autoupdate() {
+    ui_section "00" "Memasang Tool autoupdate (Self-Copy)"
+    local SRC="${BASH_SOURCE[0]}"
+    [ -z "$SRC" ] && SRC="$0"
+    if [ -f "$SRC" ]; then
+        mkdir -p /usr/local/bin
+        cp "$SRC" /usr/local/bin/autoupdate
+        chmod +x /usr/local/bin/autoupdate
+        ui_ok "Tool autoupdate dipasang di /usr/local/bin/autoupdate"
+        log_status "autoupdate" "SUCCESS" "Self-copy dari $SRC"
+    else
+        ui_warn "Tidak bisa self-copy autoupdate (source tidak ditemukan)"
+        log_status "autoupdate" "FAILED" "Source tidak ditemukan: $SRC"
+    fi
 }
 
 # ─── Modules ──────────────────────────────────────────────────────────────────
@@ -263,7 +284,7 @@ mod_ssh_config() {
     fi
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
     if [ "$changed" -eq 1 ]; then
-        ui_ok "SSH dikonfigurasi (PermitRootLogin + PasswordAuth)"
+        ui_ok "SSH dikonfigurasi"
         log_status "SSH Config" "SUCCESS" "Konfigurasi diterapkan"
     else
         ui_skip "SSH sudah terkonfigurasi"
@@ -327,49 +348,56 @@ mod_motd() {
     rm -f /etc/motd 2>/dev/null
     touch /etc/motd
 
-    cat << 'EOF' > /etc/profile.d/99-elektrik-motd.sh
+    # FIX: heredoc 'EOF' (quoted) → \$ tidak perlu di-escape, dan kita harus
+    # pakai heredoc UNQUOTED untuk interpolasi variabel CF_WEB_NAME
+    cat > /etc/profile.d/99-elektrik-motd.sh <<MOTD_EOF
 #!/bin/bash
 # Dynamic MOTD - reads live config
 if [ -f /root/config/elektrik.conf ]; then
     source /root/config/elektrik.conf
 fi
 
-OS_NAME=$(grep -oP '(?<=^PRETTY_NAME=").*(?=")' /etc/os-release 2>/dev/null || echo "Linux")
-HOST_NAME=$(hostname)
-IP_ADDR=$(hostname -I | awk '{print $1}')
-UPTIME=$(uptime -p 2>/dev/null | sed 's/up //')
-LOAD=$(cut -d' ' -f1-3 /proc/loadavg)
+# Recompute derived values defensif (jika config lama tidak punya CF_WEB_NAME)
+[ -n "\$DOMAIN" ] && [ -n "\$CF_PRE_WEB" ]    && CF_WEB_NAME="\${CF_PRE_WEB}.\${DOMAIN}"
+[ -n "\$DOMAIN" ] && [ -n "\$CF_PRE_SOCKET" ] && SOCKET_URL="\${CF_PRE_SOCKET}.\${DOMAIN}"
+
+OS_NAME=\$(grep -oP '(?<=^PRETTY_NAME=").*(?=")' /etc/os-release 2>/dev/null || echo "Linux")
+HOST_NAME=\$(hostname)
+IP_ADDR=\$(hostname -I | awk '{print \$1}')
+UPTIME=\$(uptime -p 2>/dev/null | sed 's/up //')
+LOAD=\$(cut -d' ' -f1-3 /proc/loadavg)
 
 CYAN="\e[1;36m"; GREEN="\e[1;32m"; YELLOW="\e[1;33m"; WHITE="\e[1;37m"
 GREY="\e[0;90m"; RESET="\e[0m"; BOLD="\e[1m"
 
 clear
 echo -e ""
-echo -e "${CYAN}╔══════════════════════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${CYAN}║${RESET}   ${BOLD}${WHITE}⚡ ELEKTRIK LXC CONTAINER${RESET}                                                ${CYAN}║${RESET}"
-echo -e "${CYAN}║${RESET}   ${GREY}Powered by Anjarokz  •  github.com/ginanjardwibasuki/elektrik${RESET}         ${CYAN}║${RESET}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════════════════════════╝${RESET}"
+echo -e "\${CYAN}╔══════════════════════════════════════════════════════════════════════════╗\${RESET}"
+echo -e "\${CYAN}║\${RESET}   \${BOLD}\${WHITE}⚡ ELEKTRIK LXC CONTAINER\${RESET}                                              \${CYAN}║\${RESET}"
+echo -e "\${CYAN}║\${RESET}   \${GREY}Powered by Anjarokz  •  github.com/ginanjardwibasuki/elektrik\${RESET}          \${CYAN}║\${RESET}"
+echo -e "\${CYAN}╚══════════════════════════════════════════════════════════════════════════╝\${RESET}"
 echo -e ""
-echo -e "  ${BOLD}${WHITE}▎ SYSTEM INFORMATION${RESET}"
-echo -e "  ${GREY}──────────────────────────────────────────────────────────────────────${RESET}"
-printf "  ${GREY}│${RESET} %-14s ${CYAN}%s${RESET}\n" "OS"         "$OS_NAME"
-printf "  ${GREY}│${RESET} %-14s ${CYAN}%s${RESET}\n" "Hostname"   "$HOST_NAME"
-printf "  ${GREY}│${RESET} %-14s ${CYAN}%s${RESET}\n" "IP Address" "$IP_ADDR"
-printf "  ${GREY}│${RESET} %-14s ${CYAN}%s${RESET}\n" "Uptime"     "${UPTIME:-n/a}"
-printf "  ${GREY}│${RESET} %-14s ${CYAN}%s${RESET}\n" "Load Avg"   "$LOAD"
+echo -e "  \${BOLD}\${WHITE}▎ SYSTEM INFORMATION\${RESET}"
+echo -e "  \${GREY}──────────────────────────────────────────────────────────────────────\${RESET}"
+printf "  \${GREY}│\${RESET} %-14s \${CYAN}%s\${RESET}\n" "OS"         "\$OS_NAME"
+printf "  \${GREY}│\${RESET} %-14s \${CYAN}%s\${RESET}\n" "Hostname"   "\$HOST_NAME"
+printf "  \${GREY}│\${RESET} %-14s \${CYAN}%s\${RESET}\n" "IP Address" "\$IP_ADDR"
+printf "  \${GREY}│\${RESET} %-14s \${CYAN}%s\${RESET}\n" "Uptime"     "\${UPTIME:-n/a}"
+printf "  \${GREY}│\${RESET} %-14s \${CYAN}%s\${RESET}\n" "Load Avg"   "\$LOAD"
 echo -e ""
-echo -e "  ${BOLD}${WHITE}▎ APPLICATION ENDPOINTS${RESET}"
-echo -e "  ${GREY}──────────────────────────────────────────────────────────────────────${RESET}"
-printf "  ${GREY}│${RESET} %-14s ${YELLOW}https://%s${RESET}\n" "Website"    "$CF_WEB_NAME"
-printf "  ${GREY}│${RESET} %-14s ${YELLOW}https://%s${RESET}\n" "API/Socket" "$SOCKET_URL"
+echo -e "  \${BOLD}\${WHITE}▎ APPLICATION ENDPOINTS\${RESET}"
+echo -e "  \${GREY}──────────────────────────────────────────────────────────────────────\${RESET}"
+printf "  \${GREY}│\${RESET} %-14s \${YELLOW}https://%s\${RESET}\n" "Website"    "\$CF_WEB_NAME"
+printf "  \${GREY}│\${RESET} %-14s \${YELLOW}https://%s\${RESET}\n" "API/Socket" "\$SOCKET_URL"
 echo -e ""
-echo -e "  ${BOLD}${WHITE}▎ QUICK COMMANDS${RESET}"
-echo -e "  ${GREY}──────────────────────────────────────────────────────────────────────${RESET}"
-printf "  ${GREY}│${RESET} ${GREEN}%-16s${RESET} ${GREY}→${RESET}  ${WHITE}%s${RESET}\n" "elektrik-config" "Ubah konfigurasi (kredensial, domain, token)"
-printf "  ${GREY}│${RESET} ${GREEN}%-16s${RESET} ${GREY}→${RESET}  ${WHITE}%s${RESET}\n" "autobackup"      "Backup server manual sekarang"
-printf "  ${GREY}│${RESET} ${GREEN}%-16s${RESET} ${GREY}→${RESET}  ${WHITE}%s${RESET}\n" "autorestore"     "Panduan restore data dari backup"
+echo -e "  \${BOLD}\${WHITE}▎ QUICK COMMANDS\${RESET}"
+echo -e "  \${GREY}──────────────────────────────────────────────────────────────────────\${RESET}"
+printf "  \${GREY}│\${RESET} \${GREEN}%-16s\${RESET} \${GREY}→\${RESET}  \${WHITE}%s\${RESET}\n" "autoupdate"   "Re-run installer (upgrade/config/fresh)"
+printf "  \${GREY}│\${RESET} \${GREEN}%-16s\${RESET} \${GREY}→\${RESET}  \${WHITE}%s\${RESET}\n" "autobackup"   "Backup server manual ke /root/restore"
+printf "  \${GREY}│\${RESET} \${GREEN}%-16s\${RESET} \${GREY}→\${RESET}  \${WHITE}%s\${RESET}\n" "autorestore"  "Restore dari file di /root/restore"
+printf "  \${GREY}│\${RESET} \${GREEN}%-16s\${RESET} \${GREY}→\${RESET}  \${WHITE}%s\${RESET}\n" "config"       "Ubah konfigurasi (kredensial, domain, token)"
 echo -e ""
-EOF
+MOTD_EOF
     chmod +x /etc/profile.d/99-elektrik-motd.sh
     ui_ok "MOTD dinamis dipasang"
     log_status "MOTD" "SUCCESS" "Banner dinamis aktif"
@@ -693,7 +721,6 @@ mod_cloudflare_tunnel() {
 
     if [ -n "$TUNNEL_TOKEN" ] && [ "$TUNNEL_TOKEN" != "null" ]; then
         if systemctl is-active --quiet cloudflared 2>/dev/null; then
-            ui_step "Restart cloudflared service..."
             cloudflared service uninstall >/dev/null 2>&1 || true
         fi
         rm -rf /etc/cloudflared/config.yml 2>/dev/null || true
@@ -708,12 +735,14 @@ mod_cloudflare_tunnel() {
 
 mod_backup_restore() {
     ui_section "14" "Backup & Restore Automation"
-    mkdir -p /root/elektrik_backups
+    mkdir -p "$RESTORE_DIR"
+    chmod 700 "$RESTORE_DIR"
 
     cat > /usr/local/bin/autobackup <<EOF
 #!/bin/bash
 CYAN='\033[1;36m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; RED='\033[1;31m'; NC='\033[0m'
 ERROR_COUNT=0
+
 show_progress() {
     local pid=\$1 msg=\$2
     local spin='-\|/' i=0
@@ -725,26 +754,30 @@ show_progress() {
     done
     wait "\$pid"; local status=\$?
     if [ "\$status" -eq 0 ]; then
-        printf "\r\${GREEN}[✓]\${NC} %-50s\n" "\$msg Selesai!"
+        printf "\r\${GREEN}[✓]\${NC} %-55s\n" "\$msg Selesai!"
     else
-        printf "\r\${RED}[✗]\${NC} %-50s\n" "\$msg Gagal!"; ERROR_COUNT=\$((ERROR_COUNT + 1))
+        printf "\r\${RED}[✗]\${NC} %-55s\n" "\$msg Gagal!"; ERROR_COUNT=\$((ERROR_COUNT + 1))
     fi
     tput cnorm
 }
-BACKUP_DIR="/root/elektrik_backups"
+
+BACKUP_DIR="/root/restore"
 DATE=\$(date +"%Y-%m-%d_%H-%M-%S")
 BACKUP_NAME="elektrik_backup_\$DATE"
 ARCHIVE_FILE="\$BACKUP_DIR/\$BACKUP_NAME.tar.gz"
 MYSQL_ERROR_LOG="/tmp/mysql_error_\$DATE.log"
 DB_USER="${DB_USER}"; DB_PASS="${DB_PASS}"; DB_NAME="${DB_NAME}"
 TG_BOT_TOKEN="${TG_BOT_TOKEN}"; TG_CHAT_ID="${TG_CHAT_ID}"
+SPLIT_THRESHOLD=$((48 * 1024 * 1024))
+SPLIT_PART_SIZE="45M"
 
 clear
-echo -e "\${CYAN}════════════════════════════════════════════════\${NC}"
-echo -e "\${CYAN}    MEMULAI PROSES BACKUP SERVER ELEKTRIK       \${NC}"
-echo -e "\${CYAN}════════════════════════════════════════════════\${NC}"
+echo -e "\${CYAN}════════════════════════════════════════════════════════════════\${NC}"
+echo -e "\${CYAN}        MEMULAI PROSES BACKUP SERVER ELEKTRIK                   \${NC}"
+echo -e "\${CYAN}════════════════════════════════════════════════════════════════\${NC}"
 echo ""
 mkdir -p "\$BACKUP_DIR"
+chmod 700 "\$BACKUP_DIR"
 TMP_DIR="/tmp/\$BACKUP_NAME"; mkdir -p "\$TMP_DIR"
 
 if [ -d "/var/www/elektrik/gambar" ]; then
@@ -762,29 +795,59 @@ cd "\$TMP_DIR" || exit
 show_progress \$! "Mengkompresi arsip .tar.gz"
 rm -rf "\$TMP_DIR"; cd /root || exit
 
-if [ -n "\$TG_BOT_TOKEN" ] && [ -n "\$TG_CHAT_ID" ] && [ -f "\$ARCHIVE_FILE" ]; then
+if [ -f "\$ARCHIVE_FILE" ]; then
     FILE_SIZE=\$(stat -c%s "\$ARCHIVE_FILE" 2>/dev/null || echo 0)
-    if [ "\$FILE_SIZE" -le 52428800 ]; then
-        (curl -s -F document=@"\$ARCHIVE_FILE" "https://api.telegram.org/bot\$TG_BOT_TOKEN/sendDocument" \
-            -F chat_id="\$TG_CHAT_ID" -F caption="✅ Backup Server Elektrik (\$(date +%F))" >/dev/null) &
-        show_progress \$! "Mengirim backup ke Telegram"
+    SIZE_MB=\$((FILE_SIZE / 1048576))
+
+    if [ "\$FILE_SIZE" -gt "\$SPLIT_THRESHOLD" ]; then
+        echo -e "\${YELLOW}[!] Ukuran arsip \${SIZE_MB}MB > 48MB, memecah menjadi part...\${NC}"
+        (split -b "\$SPLIT_PART_SIZE" -d -a 3 "\$ARCHIVE_FILE" "\${ARCHIVE_FILE}.part.") &
+        show_progress \$! "Memecah arsip menjadi part"
+        rm -f "\$ARCHIVE_FILE"
+
+        PART_COUNT=\$(ls "\${ARCHIVE_FILE}.part."* 2>/dev/null | wc -l)
+        echo -e "\${CYAN}[i] Arsip dipecah menjadi \$PART_COUNT part.\${NC}"
+
+        if [ -n "\$TG_BOT_TOKEN" ] && [ -n "\$TG_CHAT_ID" ]; then
+            PART_NUM=0
+            for part in "\${ARCHIVE_FILE}.part."*; do
+                [ -f "\$part" ] || continue
+                PART_NUM=\$((PART_NUM + 1))
+                PNAME=\$(basename "\$part")
+                PSIZE=\$(stat -c%s "\$part")
+                (curl -s -F document=@"\$part" "https://api.telegram.org/bot\$TG_BOT_TOKEN/sendDocument" \
+                    -F chat_id="\$TG_CHAT_ID" \
+                    -F caption="✅ Backup part \$PART_NUM/\$PART_COUNT (\$((PSIZE/1048576))MB) - \$(date +%F)" >/dev/null) &
+                show_progress \$! "Kirim part \$PART_NUM/\$PART_COUNT ke Telegram"
+                sleep 1
+            done
+        else
+            echo -e "\${YELLOW}[!] Telegram dilewati (token/chat ID kosong)\${NC}"
+        fi
     else
-        (curl -s -X POST "https://api.telegram.org/bot\$TG_BOT_TOKEN/sendMessage" \
-            -d chat_id="\$TG_CHAT_ID" -d text="⚠️ Backup lokal berhasil, >50MB gagal kirim Telegram." >/dev/null) &
-        show_progress \$! "Notifikasi ukuran >50MB"
+        if [ -n "\$TG_BOT_TOKEN" ] && [ -n "\$TG_CHAT_ID" ]; then
+            (curl -s -F document=@"\$ARCHIVE_FILE" "https://api.telegram.org/bot\$TG_BOT_TOKEN/sendDocument" \
+                -F chat_id="\$TG_CHAT_ID" \
+                -F caption="✅ Backup Server Elektrik \${SIZE_MB}MB (\$(date +%F))" >/dev/null) &
+            show_progress \$! "Mengirim backup ke Telegram"
+        else
+            echo -e "\${YELLOW}[!] Telegram dilewati (token/chat ID kosong)\${NC}"
+        fi
     fi
 else
-    echo -e "\${YELLOW}[!] Telegram dilewati (token/chat ID kosong)\${NC}"
+    echo -e "\${RED}[✗] File arsip tidak ditemukan!\${NC}"
+    ERROR_COUNT=\$((ERROR_COUNT + 1))
 fi
 
-(find "\$BACKUP_DIR" -type f -name "elektrik_backup_*.tar.gz" ! -name "\$BACKUP_NAME.tar.gz" -mtime +7 -exec rm -f {} +) &
+(find "\$BACKUP_DIR" -type f -name "elektrik_backup_*" -mtime +7 -exec rm -f {} +) &
 show_progress \$! "Cleanup backup >7 hari"
 
 echo ""
 if [ "\$ERROR_COUNT" -eq 0 ]; then
-    echo -e "\${GREEN}════════════════════════════════════════════════\${NC}"
-    echo -e "\${GREEN}  [✓] SEMUA PROSES BACKUP BERHASIL              \${NC}"
-    echo -e "\${GREEN}════════════════════════════════════════════════\${NC}"
+    echo -e "\${GREEN}════════════════════════════════════════════════════════════════\${NC}"
+    echo -e "\${GREEN}  [✓] SEMUA PROSES BACKUP BERHASIL DISELESAIKAN                \${NC}"
+    echo -e "\${GREEN}  [i] Lokasi: \$BACKUP_DIR                                     \${NC}"
+    echo -e "\${GREEN}════════════════════════════════════════════════════════════════\${NC}"
 else
     echo -e "\${RED}  [!] BACKUP SELESAI DENGAN \$ERROR_COUNT ERROR\${NC}"
     [ -s "\$MYSQL_ERROR_LOG" ] && cat "\$MYSQL_ERROR_LOG"
@@ -794,22 +857,44 @@ EOF
 
     cat > /usr/local/bin/autorestore <<EOF
 #!/bin/bash
-BACKUP_FILE=\$1
+CYAN='\033[1;36m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; RED='\033[1;31m'; NC='\033[0m'
+RESTORE_DIR="/root/restore"
 DB_USER="${DB_USER}"; DB_PASS="${DB_PASS}"; DB_NAME="${DB_NAME}"
+BACKUP_FILE="\$1"
 
 if [ -z "\$BACKUP_FILE" ]; then
-    echo "❌ CARA PAKAI: autorestore /path/ke/file_backup.tar.gz"
-    echo "📂 Backup tersedia di /root/elektrik_backups/:"
-    ls -lh /root/elektrik_backups/ 2>/dev/null
+    echo -e "\${CYAN}════════════════════════════════════════════════════════════════\${NC}"
+    echo -e "\${CYAN}              CARA PAKAI AUTORESTORE                            \${NC}"
+    echo -e "\${CYAN}════════════════════════════════════════════════════════════════\${NC}"
+    echo ""
+    echo -e "  \${GREEN}autorestore\${NC} /root/restore/elektrik_backup_YYYY-MM-DD_HH-MM-SS.tar.gz"
+    echo -e "  \${GREEN}autorestore\${NC} /root/restore/elektrik_backup_YYYY-MM-DD_HH-MM-SS.tar.gz.part.000"
+    echo ""
+    echo -e "  \${YELLOW}📂 Backup tersedia di \$RESTORE_DIR :\${NC}"
+    ls -lh "\$RESTORE_DIR" 2>/dev/null | grep -E "\.tar\.gz|\.part\." | awk '{print "    " \$9 " (" \$5 ")"}'
     exit 1
 fi
-if [ ! -f "\$BACKUP_FILE" ]; then
-    echo "❌ File \$BACKUP_FILE tidak ditemukan!"; exit 1
+
+if [[ "\$BACKUP_FILE" == *.part.* ]]; then
+    BASE=\$(echo "\$BACKUP_FILE" | sed 's/\.part\.[0-9]*\$//')
+    PARTS=(\$(ls "\${BASE}.part."* 2>/dev/null | sort))
+    if [ \${#PARTS[@]} -gt 0 ]; then
+        echo -e "\${CYAN}[i] Terdeteksi \${#PARTS[@]} part, menggabungkan...\${NC}"
+        MERGED="/tmp/elektrik_merged_\$\$.tar.gz"
+        cat "\${PARTS[@]}" > "\$MERGED"
+        BACKUP_FILE="\$MERGED"
+        CLEANUP_MERGED=1
+    fi
 fi
 
-echo "Memulai Restore Data..."
+if [ ! -f "\$BACKUP_FILE" ]; then
+    echo -e "\${RED}❌ File \$BACKUP_FILE tidak ditemukan!\${NC}"; exit 1
+fi
+
+echo -e "\${CYAN}Memulai Proses Restore dari: \$BACKUP_FILE\${NC}"
 TMP_DIR="/tmp/elektrik_restore_\$\$"; mkdir -p "\$TMP_DIR"
 tar -xzf "\$BACKUP_FILE" -C "\$TMP_DIR"
+[ "\$CLEANUP_MERGED" = "1" ] && rm -f "\$BACKUP_FILE"
 
 if [ -d "\$TMP_DIR/gambar" ]; then
     rm -rf /var/www/elektrik/gambar/*
@@ -817,15 +902,15 @@ if [ -d "\$TMP_DIR/gambar" ]; then
     cp -r "\$TMP_DIR/gambar/"* /var/www/elektrik/gambar/ 2>/dev/null
     chown -R www-data:www-data /var/www/elektrik/gambar
     chmod -R 775 /var/www/elektrik/gambar
-    echo "✔ Gambar dipulihkan."
+    echo -e "\${GREEN}✔ Gambar dipulihkan.\${NC}"
 fi
 
 if [ -f "\$TMP_DIR/database.sql" ]; then
     mysql -u"\$DB_USER" -p"\$DB_PASS" "\$DB_NAME" < "\$TMP_DIR/database.sql"
-    echo "✔ Database dipulihkan."
+    echo -e "\${GREEN}✔ Database dipulihkan.\${NC}"
 fi
 rm -rf "\$TMP_DIR"
-echo "✅ RESTORE SELESAI!"
+echo -e "\${GREEN}✅ RESTORE SELESAI!\${NC}"
 EOF
 
     chmod +x /usr/local/bin/autobackup /usr/local/bin/autorestore
@@ -840,16 +925,21 @@ EOF
     log_status "Backup/Restore" "SUCCESS" "Script & cron siap"
 }
 
+# ─── Config Tool ─────────────────────────────────────────────────────────────
 mod_config_tool() {
-    ui_section "15" "Konfigurasi Ulang Tool (elektrik-config)"
-    cat > /usr/local/bin/elektrik-config <<'ELEKTRIK_CFG_EOF'
+    ui_section "15" "Konfigurasi Ulang Tool (config)"
+    cat > /usr/local/bin/config <<'ELEKTRIK_CFG_EOF'
 #!/bin/bash
-# elektrik-config - Reconfigure Elektrik Stack
 CONFIG_FILE="/root/config/elektrik.conf"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "File konfigurasi tidak ditemukan: $CONFIG_FILE"; exit 1
 fi
 source "$CONFIG_FILE"
+
+# FIX: Recompute derived values agar tidak kosong saat config lama tidak punya field ini
+[ -n "$DOMAIN" ] && [ -n "$CF_PRE_WEB" ]    && CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
+[ -n "$DOMAIN" ] && [ -n "$CF_PRE_SOCKET" ] && SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
+[ -n "$DOMAIN" ] && CF_ROOT_DOMAIN="${DOMAIN}"
 
 RED="\e[1;31m"; GREEN="\e[1;32m"; YELLOW="\e[1;33m"; CYAN="\e[1;36m"
 BLUE="\e[1;34m"; WHITE="\e[1;37m"; GREY="\e[0;90m"; BOLD="\e[1m"; RESET="\e[0m"
@@ -893,7 +983,9 @@ edit_domain() {
     read -p "  Domain Utama [$DOMAIN]: " i; DOMAIN=${i:-$DOMAIN}
     read -p "  Subdomain Website [$CF_PRE_WEB]: " i; CF_PRE_WEB=${i:-$CF_PRE_WEB}
     read -p "  Subdomain Socket [$CF_PRE_SOCKET]: " i; CF_PRE_SOCKET=${i:-$CF_PRE_SOCKET}
-    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"; SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
+    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
+    SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
+    CF_ROOT_DOMAIN="${DOMAIN}"
 }
 edit_cloudflare() {
     read -p "  CF Account ID [$CF_ACCOUNT_ID]: " i; CF_ACCOUNT_ID=${i:-$CF_ACCOUNT_ID}
@@ -909,6 +1001,11 @@ edit_telegram() {
 }
 
 save_and_apply() {
+    # FIX: recompute derived values
+    CF_WEB_NAME="${CF_PRE_WEB}.${DOMAIN}"
+    SOCKET_URL="${CF_PRE_SOCKET}.${DOMAIN}"
+    CF_ROOT_DOMAIN="${DOMAIN}"
+
     cat > "$CONFIG_FILE" <<CFG_SAVE
 # ELEKTRIK STACK CONFIGURATION
 # Updated: $(date '+%Y-%m-%d %H:%M:%S')
@@ -920,6 +1017,9 @@ BACKEND_PORT="$BACKEND_PORT"
 DOMAIN="$DOMAIN"
 CF_PRE_WEB="$CF_PRE_WEB"
 CF_PRE_SOCKET="$CF_PRE_SOCKET"
+CF_WEB_NAME="$CF_WEB_NAME"
+SOCKET_URL="$SOCKET_URL"
+CF_ROOT_DOMAIN="$CF_ROOT_DOMAIN"
 CF_ACCOUNT_ID="$CF_ACCOUNT_ID"
 CF_ZONE_ID="$CF_ZONE_ID"
 CF_API_TOKEN="$CF_API_TOKEN"
@@ -1019,9 +1119,10 @@ while true; do
     esac
 done
 ELEKTRIK_CFG_EOF
-    chmod +x /usr/local/bin/elektrik-config
-    ui_ok "Tool elektrik-config dipasang"
-    log_status "Config Tool" "SUCCESS" "elektrik-config tersedia"
+    chmod +x /usr/local/bin/config
+    ln -sf /usr/local/bin/config /usr/local/bin/elektrik-config 2>/dev/null || true
+    ui_ok "Tool config dipasang (alias: elektrik-config)"
+    log_status "Config Tool" "SUCCESS" "config tersedia"
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -1046,7 +1147,7 @@ main() {
 
     if [ "$MODE" = "config" ]; then
         if [ -f "$CONFIG_FILE" ]; then
-            exec /usr/local/bin/elektrik-config
+            exec /usr/local/bin/config
         else
             ui_fail "Config file tidak ditemukan untuk mode config-only"
             exit 1
@@ -1056,6 +1157,8 @@ main() {
     if load_config && [ "$MODE" = "upgrade" ]; then
         echo ""
         ui_info "Konfigurasi yang ada dimuat dari $CONFIG_FILE"
+        ui_info "Website URL : https://${CF_WEB_NAME}"
+        ui_info "API URL     : https://${SOCKET_URL}"
         local reuse
         reuse=$(ui_input "Gunakan konfigurasi ini? (y/n)" "y")
         if [[ ! "$reuse" =~ ^[Yy]$ ]]; then
@@ -1071,8 +1174,11 @@ main() {
 
     ui_section "EXECUTION" "Menjalankan Modul Instalasi"
     ui_info "Mode: ${MODE}  |  Versi: ${SCRIPT_VERSION}"
+    ui_info "Website : https://${CF_WEB_NAME}"
+    ui_info "API     : https://${SOCKET_URL}"
     ui_divider
 
+    mod_self_autoupdate
     mod_ssh_config
     mod_fail2ban
     mod_system_update
@@ -1106,10 +1212,10 @@ main() {
     echo -e "${CYAN}┌──────────────────────────────────────────────────────────────────────────┐${RESET}"
     echo -e "${CYAN}│${RESET}  ${BOLD}${WHITE}PANDUAN PENGGUNAAN${RESET}                                                     ${CYAN}│${RESET}"
     echo -e "${CYAN}├──────────────────────────────────────────────────────────────────────────┤${RESET}"
-    printf "${CYAN}│${RESET}  ${GREEN}elektrik-config${RESET}  ${GREY}→${RESET} ${WHITE}%-48s${RESET} ${CYAN}│${RESET}\n" "Ubah konfigurasi & kredensial"
-    printf "${CYAN}│${RESET}  ${GREEN}autobackup${RESET}       ${GREY}→${RESET} ${WHITE}%-48s${RESET} ${CYAN}│${RESET}\n" "Backup manual server saat ini"
-    printf "${CYAN}│${RESET}  ${GREEN}autorestore${RESET}      ${GREY}→${RESET} ${WHITE}%-48s${RESET} ${CYAN}│${RESET}\n" "Panduan restore data"
-    printf "${CYAN}│${RESET}  ${GREEN}bash %s${RESET}   ${GREY}→${RESET} ${WHITE}%-48s${RESET} ${CYAN}│${RESET}\n" "$(basename "$0")" "Jalankan ulang installer kapan saja"
+    printf "${CYAN}│${RESET}  ${GREEN}autoupdate${RESET}   ${GREY}→${RESET} ${WHITE}%-52s${RESET} ${CYAN}│${RESET}\n" "Re-run installer (upgrade/config/fresh)"
+    printf "${CYAN}│${RESET}  ${GREEN}autobackup${RESET}   ${GREY}→${RESET} ${WHITE}%-52s${RESET} ${CYAN}│${RESET}\n" "Backup manual ke /root/restore (auto-split >48MB)"
+    printf "${CYAN}│${RESET}  ${GREEN}autorestore${RESET}  ${GREY}→${RESET} ${WHITE}%-52s${RESET} ${CYAN}│${RESET}\n" "Restore dari /root/restore (auto-merge part)"
+    printf "${CYAN}│${RESET}  ${GREEN}config${RESET}       ${GREY}→${RESET} ${WHITE}%-52s${RESET} ${CYAN}│${RESET}\n" "Ubah kredensial, domain, token CF/Telegram"
     echo -e "${CYAN}└──────────────────────────────────────────────────────────────────────────┘${RESET}"
     echo ""
 }
